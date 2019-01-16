@@ -2,84 +2,96 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 )
 
+var dataPool = sync.Pool{
+	New: func() interface{} {
+		return new(User)
+	},
+}
+
+//easyjson:json
+type User struct {
+	Name     string   `json:"name"`
+	Email    string   `json:"email"`
+	Browsers []string `json:"browsers"`
+}
+
 func FastSearch(out io.Writer) {
+	var i = -1
+	var unique = 0
+	var seen = make(map[string]bool, 256)
+	var users = make([]string, 0, 100)
+
 	file, err := os.Open(filePath)
 	defer file.Close()
 	if err != nil {
 		panic(err)
 	}
 
+	fmt.Fprintln(out, "found users:")
+
 	reader := bufio.NewReader(file)
-
-	seenBrowsers := make(map[string]bool)
-	uniqueBrowsers := 0
-	var foundUsers []string
-
-	var i = -1
-	//line := make([]byte, 0, 1024)
 	for {
 		line, err := reader.ReadSlice('\n')
 		if err != nil {
 			break
 		}
 
-		user := make(map[string]interface{})
-		err = json.Unmarshal(line, &user)
+		var user = dataPool.Get().(*User)
 
+		err = user.UnmarshalJSON(line)
 		if err != nil {
-			panic(err)
+			println(err)
 		}
+		dataPool.Put(user)
 
-		isAndroid := false
-		isMSIE := false
+		var userAndroid = false
+		var userMSIE = false
 
-		browsers, ok := user["browsers"].([]interface{})
-		if !ok {
-			// log.Println("cant cast browsers")
-			continue
-		}
+		for _, browser := range user.Browsers {
+			isBrowserSeen, found := seen[browser]
 
-		for _, browserRaw := range browsers {
-			browser, ok := browserRaw.(string)
-			if !ok {
-				// log.Println("cant cast browser to string")
-				continue
+			var curMSIE = false
+			var curAndroid = false
+
+			if !found {
+				curMSIE = strings.Contains(browser, "MSIE")
+				curAndroid = strings.Contains(browser, "Android")
+				seen[browser] = curMSIE || curAndroid
+			} else {
+				if isBrowserSeen {
+					curMSIE = strings.Contains(browser, "MSIE")
+					curAndroid = strings.Contains(browser, "Android")
+				} else {
+					curMSIE = false
+					curAndroid = false
+				}
 			}
 
-			curIsAndroid := strings.Contains(browser, "Android")
-			curIsMSIE := strings.Contains(browser, "MSIE")
-			isMSIE = isMSIE || curIsMSIE
-			isAndroid = isAndroid || curIsAndroid
+			userMSIE = userMSIE || curAndroid
+			userAndroid = userAndroid || curMSIE
 
-			if _, found := seenBrowsers[browser]; found == true {
-				continue
+			if !found && (curMSIE || curAndroid) {
+				unique++
 			}
-
-			if curIsAndroid || curIsMSIE {
-				seenBrowsers[browser] = true
-				uniqueBrowsers++
-			}
-			isMSIE = isMSIE || curIsMSIE
-			isAndroid = isAndroid || curIsAndroid
-
 		}
+
 		i++
-		if !(isAndroid && isMSIE) {
+		if !(userMSIE && userAndroid) {
 			continue
 		}
 
-		// log.Println("Android and MSIE user:", user["name"], user["email"])
-		email := strings.Replace(user["email"].(string), "@", " [at] ", 1)
-		foundUsers = append(foundUsers, fmt.Sprintf("[%d] %s <%s>\n", i, user["name"], email))
+		var email = strings.Split(user.Email, "@")
+		users = append(users, "["+strconv.Itoa(i)+"] "+user.Name+" <"+email[0]+" [at] "+email[1]+">")
 	}
 
-	fmt.Fprintln(out, "found users:\n"+strings.Join(foundUsers, ""))
-	fmt.Fprintln(out, "Total unique browsers", len(seenBrowsers))
+	fmt.Fprintln(out, strings.Join(users, "\n"))
+	fmt.Fprintln(out, "\nTotal unique browsers", unique)
 }
